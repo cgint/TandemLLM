@@ -25,7 +25,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certifi
     && curl -LsSf "https://astral.sh/uv/${UV_VERSION}/install.sh" \
        | env UV_INSTALL_DIR=/opt/uv UV_NO_MODIFY_PATH=1 sh \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
-ENV PATH="/opt/uv/bin:${PATH}"
+ENV PATH="/opt/uv:${PATH}"
 
 # Copy the engine source (the repo checkout IS the source -- the server runs from it, exactly
 # like install.sh's $DIR/src). docker/.dockerignore keeps the context to what the runtime
