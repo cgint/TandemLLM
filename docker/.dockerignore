@@ -1,0 +1,21 @@
+# Keep the build context small: only the engine source, ops/ (for the tile & stair-table JSON
+# files that serve.env references via ${REPO}/ops/...), and tools/ (for the corpus build and
+# drop_page_cache.py) are needed. Nothing else is read at runtime.
+.git
+.github
+*.md
+!README.md
+!LICENSE
+!VERSION
+docs/
+tests/
+media/
+.tandemllm-*
+__pycache__/
+*.pyc
+.venv/
+venv/
+*.log
+corpus/
+state/
+logs/
