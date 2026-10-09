@@ -1,5 +1,7 @@
 # TandemLLM
 
+> **This fork adds Docker support.** A container path next to `install.sh` — the same engine, the same pinned dependencies, the same `ops/serve.env` contract, packaged so the model weights are never baked into the image. See [docs/docker.md](docs/docker.md). Everything else in this repository is unchanged from the original, and all credit for the engine, the StairCut method, the published NVFP4 weights, and the installer goes to [the original repository](https://github.com/0xBakeer/TandemLLM) (Khaled Bakeer).
+
 TandemLLM is an inference engine for Qwen3.8-27B on one NVIDIA DGX Spark. With the published NVFP4 weights and StairCut on, it writes about 50 tokens a second for one request. Plain greedy decoding on the same box runs at 13.69 tok/s. The text is the model's own greedy text, with one documented exception: where the two best tokens are within one unit in the last place (ulp), the batched verify can round the other way ([docs/exactness.md](docs/exactness.md)).
 
 TandemLLM is a working name, and it says how the engine works. Small drafters guess the next tokens, and the big model checks all the guesses in one pass. A guess the model agrees with is a free token. At the first wrong guess the model puts in its own token, so nothing a drafter does reaches the output.
