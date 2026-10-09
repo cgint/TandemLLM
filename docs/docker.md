@@ -35,16 +35,20 @@ the 3.11 venv the engine needs (`tests/test_grammar.py` passes under 3.11 and fa
 same pinned version `install.sh` fetches when the host has neither `uv` nor `python3.11`.
 The image takes its CUDA from the base, its Python from the venv.
 
-Check at build time (`[unverified]` until the first build):
+Verified at build time (the image was built and the values read back from it):
 
 ```
-docker run --rm --entrypoint nvcc tandemllm:latest --version
-docker run --rm --entrypoint cat  tandemllm:latest /etc/os-release
+docker run --rm --platform linux/arm64 --entrypoint nvcc tandemllm:latest --version
+#   Cuda compilation tools, release 13.3, V13.3.73
+docker run --rm --platform linux/arm64 --entrypoint /opt/venv/bin/python tandemllm:latest -c "import torch;print(torch.__version__)"
+#   2.13.0+cu130
+docker run --rm --platform linux/arm64 --entrypoint /opt/uv/uv tandemllm:latest --version
+#   uv 0.12.12 (aarch64-unknown-linux-gnu)
 ```
 
-`install.sh` only *warns* when `nvcc` is not a 13.x release; if the base's toolkit is
-13.3, the first start is the moment the skinny-kernel compile is actually verified --
-watch for `$TORCH_EXTENSIONS_DIR` to fill under the `tandem-data` volume.
+`install.sh` only *warns* when `nvcc` is not a 13.x release; the first start is the moment
+the skinny-kernel compile is actually verified -- watch for `$TORCH_EXTENSIONS_DIR` to fill
+under the `tandem-data` volume.
 
 ## Build
 
@@ -57,8 +61,19 @@ git clone https://github.com/0xBakeer/TandemLLM && cd TandemLLM
 docker build --platform linux/arm64 -t tandemllm:latest .
 ```
 
-On an x86_64 build host, build for the Spark with `docker buildx` / a remote arm64
-builder; the target arch of the served image is `linux/arm64`.
+On an x86_64 build host, build for the Spark with `docker buildx` + qemu:
+
+```
+sudo apt-get install -y docker-buildx qemu-user binfmt-support   # one-time
+docker buildx create --name arm64-builder --driver docker-container \
+  --platform linux/arm64,linux/amd64 --bootstrap
+docker buildx build --builder arm64-builder --platform linux/arm64 \
+  --load -t tandemllm:latest .
+# save for transfer to the Spark:
+docker save tandemllm:latest | gzip > tandemllm-arm64.tar.gz
+```
+
+The target arch of the served image is `linux/arm64`.
 
 ## Run
 
