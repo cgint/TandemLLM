@@ -1,0 +1,72 @@
+# TandemLLM in Docker, side-by-side with install.sh (docs/docker.md).
+#
+# One engine per board, exactly like the native path. The target is the DGX Spark (GB10):
+# the engine takes ~64 GiB of the board's unified memory at load, so stop other GPU work
+# before `docker compose up` (the entrypoint checks and warns).
+#
+# Volumes (the contract, detailed in docs/docker.md):
+#   hf-cache        the Hugging Face cache root -- the four weight repositories, pre-acquired
+#                   on the host, NEVER in the image. Default: the host's own cache root
+#                   (~/.cache/huggingface); the entrypoint's HF_HOME points at it.
+#   tandem-data     corpus + the kernel-JIT cache (~/.cache/torch_extensions, persistent so the
+#                   sm_121a skinny kernel is never silently rebuilt) + logs + the usage ledger.
+#   serve.env       the serving configuration. Default: the repo's own ops/serve.env baked into
+#                   the image (the entrypoint re-points its host paths at the container's).
+#                   Mount a deployment-specific file (host paths replaced by container paths)
+#                   to override -- same contract as the native path's serve.env.
+#
+#   docker compose up -d        # first start builds the corpus (a few minutes), then loads
+#   docker compose logs -f      # engine output
+#   docker compose run --rm client bash docker/smoke.sh   # /health + one generation
+#
+# The weights are mounted at the HF cache root; the corpus and the kernel cache live in the
+# tandem-data volume. The API is on the host's :8000 (change the "8000:8000" to taste).
+
+services:
+  tandem:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      # Target arch: aarch64 (GB10). The image also builds on x86_64 (all wheels exist),
+      # but the served profile was measured on the Spark.
+      platforms:
+        - linux/arm64
+    image: tandemllm:latest
+    container_name: tandemllm
+    ports:
+      - "8000:8000"
+    # The engine allocates shared memory across processes (the NVCC JIT, NCCL): host IPC.
+    ipc: host
+    # All GPUs, NVIDIA capability.
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    environment:
+      # The image's defaults; override per deployment here (docs/docker.md).
+      TZ: Europe/Berlin
+      # SERVE_ENV: /path/to/your/serve.env   # mount it below, then uncomment
+      # TANDEM_NO_CORPUS: "1"                # skip the lookup corpus (the drafter copies
+                                             # from the conversation only; the install.sh
+                                             # --no-corpus equivalent)
+      # TANDEM_MIN_FREE_GIB: "64"           # the unified-memory check
+    volumes:
+      # The weights: the host's Hugging Face cache root (read-only). The entrypoint sets
+      # HF_HOME to this; the hub cache lands in <mount>/hub -- exactly install.sh's
+      # ${HF_HOME:-$HOME/.cache/huggingface}/hub convention. The four repositories must
+      # already be pre-acquired there (install.sh step 4, or the fleet's pre-acquire).
+      - ${HF_HOME:-~/.cache/huggingface}:/var/tandemllm/hf:ro
+      # Corpus, kernel JIT cache (the sm_121a skinny kernel is never silently rebuilt),
+      # logs, usage ledger: one persistent volume, $TANDEM_DATA_DIR in the container.
+      - tandem-data:/var/tandemllm/data
+    # The serve.env: the repo's own ops/serve.env is baked into the image and the entrypoint
+    # re-points its host paths at the container's. To override with a deployment-specific
+    # file (container paths baked in), mount it and set SERVE_ENV under environment: above:
+    #   - /path/to/serve.env:/opt/tandemllm/serve.override:ro
+    #   SERVE_ENV: /opt/tandemllm/serve.override
+
+volumes:
+  tandem-data:
