@@ -67,3 +67,16 @@ are in `docker/entrypoint.sh` (fair play — not on the gold-rule list), mirrori
   JIT itself is proven to work from the native run).
 - **One engine per board** — ~56 GiB (measured native) to 69 GiB reserved at full context;
   the board must be dedicated to whichever engine is up (see `docs/operations.md`).
+
+## StairCut is on (author's concern, resolved)
+
+The container runs the **full StairCut profile**, not a non-StairCut fallback. The entrypoint
+sources `serve.env` (`set -a; . serve.env; set +a`) and its re-points reach the `exec`'d
+python, so the live server process carries all 43 `QWEN38_*` vars, including the StairCut
+`QWEN38_STAIR_TABLES` / `QWEN38_STAIR_RHO` / `QWEN38_STAIR_SKIP=1` / `QWEN38_LEN_SWITCH=1` /
+`QWEN38_LEN_MODE=wide` / `QWEN38_DEEP=32` / `QWEN38_SKINNY_TILES*` -- with the correct
+in-container `/opt/tandemllm/ops/...` paths (the re-point fix).
+
+Diagnosis gotcha (why this looked broken at first): `docker exec <c> env` spawns a **fresh
+bash** that does not inherit PID 1's exports, so the `QWEN38_*` vars appear unset. Read
+`/proc/1/environ` of the running server to see the real env.
