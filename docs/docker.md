@@ -154,6 +154,14 @@ every `QWEN38_*` switch, the measured values) reaches the server byte for byte. 
 deployment can instead mount its own `serve.env` carrying container paths and set
 `SERVE_ENV` to it -- the entrypoint's re-pointing then becomes a no-op for those keys.
 
+The entrypoint also derives the full-power drafter flags from `serve.env`, the way
+`ops/start.sh` does, so the container reproduces the served profile rather than a
+default one: `DROP_IDLE=1` -> `--drop-idle`, `SAMPLED_TREE=det` ->
+`--sampled-tree=det`. And it passes `--vision off` by default (`VISION` to override):
+the release's `_load_vision` needs pillow+torchvision, which the pinned lock does not
+ship, so a stock start would crash at the vision step; off is the text-only path that
+reaches full power today (image input disabled).
+
 ## What is different vs `install.sh`
 
 | | `install.sh` | Docker |
@@ -166,6 +174,7 @@ deployment can instead mount its own `serve.env` carrying container paths and se
 | kernel cache | `~/.cache/torch_extensions` on the box | `tandem-data` volume (`TORCH_EXTENSIONS_DIR`), so it survives container recreation |
 | serve.env | rendered into `$DIR/run/ops/serve.env` | the repo's file, sourced as-is; host-path keys re-pointed by the entrypoint (or mount your own) |
 | supervisor | the `bin/tandem` control script / the cron line | `docker compose` (one container; `Restart=on-failure` equivalent via compose if you add it) |
+| listen address | `127.0.0.1` (loopback only) | `0.0.0.0` (the baked `serve.env`) -- reachable from the host network, e.g. an SSH tunnel from another host |
 | memory check | refuses to start under 64 GiB free | warns (the entrypoint); the compose file notes it too |
 | first-start cost | installer steps 2-5 on the box | image build + corpus build + kernel JIT (first generation only) |
 

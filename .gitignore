@@ -10,3 +10,4 @@ logs/
 corpus/
 corpus-*/
 train/
+.tandem-docker-working-memory.md

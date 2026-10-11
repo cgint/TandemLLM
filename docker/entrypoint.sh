@@ -26,7 +26,7 @@ cd "$REPO"
 # $HF_HOME the (read-only) weights mount.
 export HF_HOME="${HF_HOME:-/var/tandemllm/hf}"          # the hub cache lands in $HF_HOME/hub (install.sh's convention)
 export TORCH_EXTENSIONS_DIR="$DATA/torch_extensions"   # the sm_121a skinny kernel's JIT cache; must persist
-mkdir -p "$TORCH_EXTENSIONS_DIR" "$DATA/corpus" "$DATA/logs" "$DATA/state/usage"
+mkdir -p "$TORCH_EXTENSIONS_DIR" "$DATA/logs" "$DATA/state/usage"
 
 log() { printf '[tandem-docker] %s\n' "$*"; }
 
@@ -110,12 +110,23 @@ elif [ -f "$CORPUS_DIR/meta.json" ]; then
     log "corpus: already built: $CORPUS_DIR ($(sed -n 's/.*"n_tokens": \([0-9]*\).*/\1/p' "$CORPUS_DIR/meta.json") tokens)"
 else
     log "corpus: building on first start (CPU only, a few minutes)"
+    # The Wikipedia parquets come from the pre-acquired HF dataset cache (the entrypoint's
+    # HF_HUB_DIR already points at it); no live re-download. The cache keeps a refs/ pointer
+    # per dataset, exactly like the model repos.
     WIKI_REPO="wikimedia/wikipedia"
     WIKI_EN="20231101.en/train-00000-of-00041.parquet"
     WIKI_DE="20231101.de/train-00000-of-00020.parquet"
-    # The base tokenizer comes from the mounted weights (SNAP_BASE, resolved above) -- no live
-    # re-download of the base repository's config.
-    WIKI_PATHS="$("$PY" - "$WIKI_REPO" "$WIKI_EN" "$WIKI_DE" <<'EOF'
+    WIKI_DIR="$HF_HUB_DIR/datasets--${WIKI_REPO//\//--}"
+    WIKI_SHA=""
+    for ref in main master; do
+        [ -f "$WIKI_DIR/refs/$ref" ] && { WIKI_SHA="$(cat "$WIKI_DIR/refs/$ref")"; break; }
+    done
+    if [ -n "$WIKI_SHA" ] && [ -d "$WIKI_DIR/snapshots/$WIKI_SHA" ]; then
+        EN_PQ="$WIKI_DIR/snapshots/$WIKI_SHA/$WIKI_EN"
+        DE_PQ="$WIKI_DIR/snapshots/$WIKI_SHA/$WIKI_DE"
+    else
+        # no local dataset cache: fall back to a live download (the original path)
+        WIKI_PATHS="$("$PY" - "$WIKI_REPO" "$WIKI_EN" "$WIKI_DE" <<'EOF'
 import sys
 from huggingface_hub import hf_hub_download
 repo = sys.argv[1]
@@ -123,15 +134,18 @@ for f in sys.argv[2:]:
     print(hf_hub_download(repo, f, repo_type="dataset"))
 EOF
 )" || { echo "[tandem-docker] Wikipedia download failed; re-run with TANDEM_NO_CORPUS=1 to skip the corpus" >&2; exit 1; }
-    EN_PQ="$(sed -n 1p <<<"$WIKI_PATHS")"; DE_PQ="$(sed -n 2p <<<"$WIKI_PATHS")"
+        EN_PQ="$(sed -n 1p <<<"$WIKI_PATHS")"; DE_PQ="$(sed -n 2p <<<"$WIKI_PATHS")"
+    fi
     SITE="$("$PY" -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')"
     rm -rf "$CORPUS_DIR.partial"
-    (nice -n 10 "$PY" tools/build_corpus.py --model "$SNAP_BASE" --out "$CORPUS_DIR.partial"
-        --parquet "$EN_PQ:text::12000000" --parquet "$DE_PQ:text::7000000"
-        --src "$SITE/transformers:6000000" --src "$SITE/torch:5000000" --src "$SITE/triton:1500000"
+    (nice -n 10 "$PY" tools/build_corpus.py --model "$SNAP_BASE" --out "$CORPUS_DIR.partial" \
+        --parquet "$EN_PQ:text::12000000" --parquet "$DE_PQ:text::7000000" \
+        --src "$SITE/transformers:6000000" --src "$SITE/torch:5000000" --src "$SITE/triton:1500000" \
         --src "$REPO/engine" --src "$REPO/tools" --max-tokens 40000000) 2>&1 | sed 's/^/    | /' \
         || { echo "[tandem-docker] the corpus build failed; re-run with TANDEM_NO_CORPUS=1 to skip it" >&2; exit 1; }
     [ -f "$CORPUS_DIR.partial/meta.json" ] || { echo "[tandem-docker] the corpus build wrote no meta.json" >&2; exit 1; }
+    # Clean the target so the mv is a rename (corpus/ must not pre-exist), robust to any leftover.
+    rm -rf "$CORPUS_DIR"
     mv "$CORPUS_DIR.partial" "$CORPUS_DIR"
     CORPUS_VALUE="$CORPUS_DIR"
     log "corpus: built: $CORPUS_DIR"
@@ -144,6 +158,9 @@ fi
 #    The repo's template points NV/HEAD/CKPT8/CKPT16/CORPUS/QSE_USAGE_LEDGER at the author's
 #    host install; those are re-pointed at the container's volumes here (a host-mounted
 #    SERVE_ENV may already carry container paths -- in which case this is a no-op for them).
+#    serve.env also sets REPO itself (line 20: ${HOME}/qwen38-spark-engine), which clobbers any
+#    pre-set REPO during the source -- so the ${REPO}/ops table paths (QWEN38_STAIR_TABLES,
+#    QWEN38_SKINNY_TILES*, QWEN38_STAIR_RHO) must be re-pointed here too, not pre-set.
 # ---------------------------------------------------------------------------------------------
 set -a
 # shellcheck source=/dev/null
@@ -151,9 +168,21 @@ set -a
 set +a
 
 # The container's paths (after the env file: the file's own values win only if it already
-# carries container paths).
-export PY="$PY" REPO="$REPO"
+# carries container paths). The repo's ops/serve.env points PY / REPO / PYTHONPATH at the
+# author's HOST install (the venv, the repo checkout, a private lib dir) -- none of which exist
+# in the container. Force the container's own values here, or the exec below runs the host's
+# (non-existent) interpreter and the engine can't import its packages.
+export PY="/opt/venv/bin/python"
+export REPO="/opt/tandemllm"
+export PYTHONPATH="$REPO"
 export QWEN38_MODEL="$SNAP_BASE"
+# The ${REPO}/ops table files: serve.env derived them from its host REPO (${HOME}/qwen38-spark-engine),
+# which doesn't exist in the container. Re-point at the baked /opt/tandemllm/ops (they ship in the
+# image). Without this the drafter's LengthRouter crashes opening stair-tables-nvfp4.json.
+export QWEN38_STAIR_TABLES="$REPO/ops/stair-tables-nvfp4.json"
+export QWEN38_SKINNY_TILES="$REPO/ops/skinny-tiles.json"
+export QWEN38_SKINNY_TILES_WIDE="$REPO/ops/skinny-tiles-wide.json"
+export QWEN38_STAIR_RHO="$REPO/ops/lookup-rho.json"
 export NV="${SNAP_NV}/mlp.safetensors,${SNAP_NV}/gdn.safetensors,${SNAP_NV}/attn.safetensors"
 export HEAD="${SNAP_NV}/head-fp8.safetensors"
 export CKPT8="$SNAP_B8"
@@ -172,6 +201,20 @@ CORPUS_FLAG=""
 export QWEN38_FUSE_PROJ="$FUSE_PROJ" PYTHONPATH="$PYTHONPATH"
 LATCH_FLAG=""
 [ "${LEN_LATCH:-0}" = "1" ] && LATCH_FLAG="--len-latch"
+# The same drafter-policy flags ops/start.sh derives from serve.env: without these the
+# container would run a different (non-StairCut) served profile than the native path.
+DROP_FLAG=""; [ "${DROP_IDLE:-0}" = "1" ] && DROP_FLAG="--drop-idle"
+# the sampled request's verify tree: det (or 1) -> --sampled-tree=det, matching start.sh.
+case "${SAMPLED_TREE:-}" in
+    1|det) SAMPLED_FLAG="--sampled-tree=det" ;;
+    mixed) SAMPLED_FLAG="--sampled-tree=mixed" ;;
+    *)     SAMPLED_FLAG="" ;;
+esac
+# Vision: the release's _load_vision needs pillow+torchvision, which the lock does not pin,
+# so a stock start crashes there. Default OFF (the native run ran text-only with --vision off);
+# set VISION=on only once the image ships the image deps.
+VISION_FLAG=""
+if [ "${VISION:-off}" = "on" ]; then VISION_FLAG="--vision on"; else VISION_FLAG="--vision off"; fi
 
 LOG="$DATA/logs/engine-$(date +%Y%m%d-%H%M%S).log"
 ln -sfn "$LOG" "$DATA/logs/engine.log"
@@ -182,10 +225,10 @@ exec "$PY" -u server/app.py \
     --host "$HOST" --port "$PORT" --served-model "$SERVED_MODEL" \
     --max-len "$MAX_LEN" --default-max-tokens "$DEFAULT_MAX_TOKENS" \
     --reasoning-format "$REASONING_FORMAT" --reasoning-effort "$REASONING_EFFORT" \
-    --drafter lenrouter --len-fixed "$LEN_FIXED" $LATCH_FLAG \
-    --dflash2-path greedy --tree --budget "$BUDGET" $CORPUS_FLAG \
+    --drafter lenrouter --len-fixed "$LEN_FIXED" $LATCH_FLAG $DROP_FLAG \
+    --dflash2-path greedy ${SAMPLED_FLAG} --tree --budget "$BUDGET" $CORPUS_FLAG \
     --dflash2-ckpt "$CKPT8" --dflash2-ckpt16 "$CKPT16" \
     --nvfp4 "$NV" --fp8-head "$HEAD" --cache-budget-gb "$CACHE_GB" \
     --request-timeout "$REQUEST_TIMEOUT" --max-queue "$MAX_QUEUE" \
-    --queue-timeout "$QUEUE_TIMEOUT" --verbose \
+    --queue-timeout "$QUEUE_TIMEOUT" ${VISION_FLAG} --verbose \
     >>"$LOG" 2>&1
