@@ -70,13 +70,29 @@ are in `docker/entrypoint.sh` (fair play — not on the gold-rule list), mirrori
 
 ## StairCut is on (author's concern, resolved)
 
-The container runs the **full StairCut profile**, not a non-StairCut fallback. The entrypoint
-sources `serve.env` (`set -a; . serve.env; set +a`) and its re-points reach the `exec`'d
-python, so the live server process carries all 43 `QWEN38_*` vars, including the StairCut
-`QWEN38_STAIR_TABLES` / `QWEN38_STAIR_RHO` / `QWEN38_STAIR_SKIP=1` / `QWEN38_LEN_SWITCH=1` /
-`QWEN38_LEN_MODE=wide` / `QWEN38_DEEP=32` / `QWEN38_SKINNY_TILES*` -- with the correct
-in-container `/opt/tandemllm/ops/...` paths (the re-point fix).
+The container runs the **full StairCut profile**, not a non-StairCut fallback. Verified from
+four primary sources, not just "the env var is set":
+
+- **Code gate** (`engine/lenrouter.py`): `self.calc = (QWEN38_LEN_SWITCH == "1") and
+  QWEN38_LEN_MODE in {"calc", "wide"}`, and when `calc` is true each drafter arm gets
+  `arm.stair = True`. That is the StairCut on/off switch.
+- **Doc** (`docs/speculative-decoding.md` / `docs/architecture.md`): "the served profile
+  (the published NVFP4 set, StairCut on)" -- StairCut is the staircase-priced router in
+  `engine/lenrouter.py`.
+- **Process env** (`/proc/1/environ` of the live server): `QWEN38_LEN_SWITCH=1`,
+  `QWEN38_LEN_MODE=wide`, `QWEN38_STAIR_TABLES=/opt/tandemllm/ops/stair-tables-nvfp4.json`,
+  `QWEN38_STAIR_RHO=/opt/tandemllm/ops/lookup-rho.json` -- all correct in-container paths
+  (the re-point fix), and the table files exist and are the measured NVFP4 ones (not empty).
+- **Runtime log** (the live drafter line): `widths {16:..., 24:..., 32:...}` (node counts
+  cut per round on the staircase), `commits 16:1x8, 2x19, 3x30, ...` (varied cut depths
+  committing), and online `cost tN@1k/@2k/@4k/@8k` curves updating line to line -- the
+  `stair_price_fn` pricing each cut by context length. A fixed-block router would show a
+  constant width, not a distribution over {16,24,32} with online costs.
+
+`QWEN38_STAIR_SKIP` is **not** the StairCut switch: it is the *head-skip rule*, a sub-feature
+(off=`0`, on=`1`), and it is not what turns the staircase on.
 
 Diagnosis gotcha (why this looked broken at first): `docker exec <c> env` spawns a **fresh
-bash** that does not inherit PID 1's exports, so the `QWEN38_*` vars appear unset. Read
-`/proc/1/environ` of the running server to see the real env.
+bash** that does not inherit PID 1's exports, so the `QWEN38_*` vars appear unset there.
+Read `/proc/1/environ` of the running server for the real env, and the `engine-*.log`
+drafter lines for the runtime signal.
